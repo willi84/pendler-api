@@ -1,4 +1,5 @@
-const fs = require("fs/promises");
+// const fs = require("fs/promises");
+import fs from "fs/promises";
 
 // const ICS_URL = process.env.ICS_URL;
 const ICS_URL = 'https://calendar.google.com/calendar/ical/ce992f3cbc85a332aff75577f178b0677206d4c1bb55bfac3b2848b740438b1f%40group.calendar.google.com/public/basic.ics';
