@@ -3,7 +3,7 @@ import fs from "fs/promises";
 
 // const ICS_URL = process.env.ICS_URL;
 const ICS_URL = 'https://calendar.google.com/calendar/ical/ce992f3cbc85a332aff75577f178b0677206d4c1bb55bfac3b2848b740438b1f%40group.calendar.google.com/public/basic.ics';
-const OUTPUT_FILE = process.env.OUTPUT_FILE || "./data.json";
+const OUTPUT_FILE = process.env.OUTPUT_FILE || "data.json";
 
 const geoCache = new Map();
 
@@ -62,8 +62,9 @@ async function main() {
     }
   }
 
+   await fs.mkdir("docs", { recursive: true });
   await fs.writeFile(
-    OUTPUT_FILE,
+    `docs/${OUTPUT_FILE}`,
     JSON.stringify(
       {
         generatedAt: new Date().toISOString(),
