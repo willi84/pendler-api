@@ -1,7 +1,5 @@
-// const fs = require("fs/promises");
 import fs from "fs/promises";
 
-// const ICS_URL = process.env.ICS_URL;
 const ICS_URL = 'https://calendar.google.com/calendar/ical/ce992f3cbc85a332aff75577f178b0677206d4c1bb55bfac3b2848b740438b1f%40group.calendar.google.com/public/basic.ics';
 const OUTPUT_FILE = process.env.OUTPUT_FILE || "data.json";
 
@@ -46,14 +44,23 @@ async function main() {
         start: get("DTSTART"),
         end: get("DTEND"),
         rrule: get("RRULE") || null,
+        icsGeo: parseIcsGeo(get("GEO")),
       };
     });
 
   const enrichedEvents = [];
   for (const event of events) {
-    const geo = await geocode(event.location);
+    const geo = event.icsGeo || (await geocode(event.location));
     enrichedEvents.push({
-      ...event,
+      id: event.id,
+      title: event.title,
+      location: event.location,
+      description: event.description,
+      start: event.start,
+      end: event.end,
+      rrule: event.rrule,
+      latitude: geo?.lat ?? null,
+      longitude: geo?.lon ?? null,
       geo,
     });
 
@@ -62,7 +69,7 @@ async function main() {
     }
   }
 
-   await fs.mkdir("docs", { recursive: true });
+  await fs.mkdir("docs", { recursive: true });
   await fs.writeFile(
     `docs/${OUTPUT_FILE}`,
     JSON.stringify(
@@ -84,7 +91,8 @@ async function main() {
 async function geocode(location) {
   if (!location) return null;
 
-  const key = location.trim().toLowerCase();
+  const normalizedLocation = normalizeLocation(location);
+  const key = normalizedLocation.trim().toLowerCase();
   if (!key) return null;
 
   if (geoCache.has(key)) {
@@ -93,7 +101,7 @@ async function geocode(location) {
 
   const url =
     "https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=" +
-    encodeURIComponent(location);
+    encodeURIComponent(normalizedLocation);
 
   const res = await fetch(url, {
     headers: {
@@ -113,13 +121,39 @@ async function geocode(location) {
     ? {
         lat: Number(first.lat),
         lon: Number(first.lon),
-        displayName: first.display_name || location,
+        displayName: first.display_name || normalizedLocation,
         source: "nominatim",
       }
     : null;
 
   geoCache.set(key, result);
   return result;
+}
+
+function parseIcsGeo(value) {
+  if (!value) return null;
+
+  const [rawLat, rawLon] = value.split(/[;,]/).map((part) => part.trim());
+  const lat = Number(rawLat);
+  const lon = Number(rawLon);
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return null;
+  }
+
+  return {
+    lat,
+    lon,
+    source: "ics",
+  };
+}
+
+function normalizeLocation(location) {
+  return location
+    .replace(/^Beispielort:\s*/i, "")
+    .replace(/\\,/g, ",")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function sleep(ms) {
