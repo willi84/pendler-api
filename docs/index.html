@@ -2,12 +2,202 @@
 <html lang="de">
   <head>
     <meta charset="utf-8" />
-    <title>API JSON</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pendler API – Events</title>
+
+    <!-- Bootstrap (CDN) -->
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+      integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+      crossorigin="anonymous"
+    />
   </head>
-  <body>
-    <h1>API JSON</h1>
-    <p><a href="./data.json">data.json öffnen</a></p>
-    <p><a href="./calendar.ics">calendar.ics herunterladen (normalisiert)</a></p>
-    <p><a href="./calendar-original.ics">calendar-original.ics herunterladen (original)</a></p>
+  <body class="bg-light">
+    <div class="container py-4">
+      <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3 mb-3">
+        <div>
+          <h1 class="h3 mb-1">Pendler API – Events</h1>
+          <div class="text-body-secondary">
+            Quelle: <a href="./data.json" class="link-secondary">data.json</a>
+            · <a href="./calendar.ics" class="link-secondary">calendar.ics</a>
+            · <a href="./calendar-original.ics" class="link-secondary">calendar-original.ics</a>
+          </div>
+        </div>
+        <div class="d-flex gap-2 align-items-center">
+          <label for="filter" class="form-label mb-0 text-body-secondary">Filter</label>
+          <input id="filter" class="form-control" style="max-width: 320px" placeholder="Titel / Ort / Beschreibung…" />
+        </div>
+      </div>
+
+      <div class="card shadow-sm">
+        <div class="card-body">
+          <div id="meta" class="small text-body-secondary mb-3"></div>
+
+          <div id="loading" class="alert alert-info mb-0" role="alert">Lade Events…</div>
+          <div id="error" class="alert alert-danger d-none" role="alert"></div>
+
+          <div class="table-responsive d-none" id="tableWrap">
+            <table class="table table-striped table-hover align-middle mb-0">
+              <thead>
+                <tr>
+                  <th style="width: 180px">Start</th>
+                  <th style="width: 180px">Ende</th>
+                  <th>Titel</th>
+                  <th>Ort</th>
+                  <th class="text-end" style="width: 120px">Geo</th>
+                </tr>
+              </thead>
+              <tbody id="tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <p class="mt-3 small text-body-secondary">
+        Hinweis: Darstellung basiert auf den in <code>data.json</code> vorhandenen Feldern.
+      </p>
+    </div>
+
+    <script>
+      function parseIcsDate(value) {
+        // Common formats:
+        // - 20260427T083000Z
+        // - 20260427T083000
+        // - 20260427
+        if (!value) return null;
+
+        const v = String(value).trim();
+        if (!v) return null;
+
+        // Date-only (all-day)
+        if (/^\d{8}$/.test(v)) {
+          const y = Number(v.slice(0, 4));
+          const m = Number(v.slice(4, 6)) - 1;
+          const d = Number(v.slice(6, 8));
+          return new Date(Date.UTC(y, m, d, 0, 0, 0));
+        }
+
+        const m = v.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z)?$/);
+        if (!m) return null;
+
+        const year = Number(m[1]);
+        const month = Number(m[2]) - 1;
+        const day = Number(m[3]);
+        const hour = Number(m[4]);
+        const minute = Number(m[5]);
+        const second = Number(m[6]);
+        const isUtc = Boolean(m[7]);
+
+        return isUtc
+          ? new Date(Date.UTC(year, month, day, hour, minute, second))
+          : new Date(year, month, day, hour, minute, second);
+      }
+
+      function formatDate(dt) {
+        if (!dt) return "";
+        // de-DE formatting
+        return new Intl.DateTimeFormat("de-DE", {
+          dateStyle: "medium",
+          timeStyle: "short",
+        }).format(dt);
+      }
+
+      function hasTimeComponent(value) {
+        // If value is YYYYMMDD -> no time
+        return value && !/^\d{8}$/.test(String(value).trim());
+      }
+
+      let allRows = [];
+
+      function render(filterText) {
+        const q = (filterText || "").trim().toLowerCase();
+        const rows = !q
+          ? allRows
+          : allRows.filter((r) =>
+              [r.title, r.location, r.description].some((x) => String(x || "").toLowerCase().includes(q))
+            );
+
+        const tbody = document.getElementById("tbody");
+        tbody.innerHTML = "";
+
+        for (const r of rows) {
+          const tr = document.createElement("tr");
+
+          const geoText =
+            r.latitude != null && r.longitude != null
+              ? `${r.latitude.toFixed(5)}, ${r.longitude.toFixed(5)}`
+              : "";
+
+          tr.innerHTML = `
+            <td><span class="font-monospace small">${r.startText}</span></td>
+            <td><span class="font-monospace small">${r.endText}</span></td>
+            <td>
+              <div class="fw-semibold">${escapeHtml(r.title || "")}</div>
+              ${r.description ? `<div class="small text-body-secondary text-truncate" style="max-width: 520px">${escapeHtml(r.description)}</div>` : ""}
+            </td>
+            <td>${escapeHtml(r.location || "")}</td>
+            <td class="text-end"><span class="font-monospace small">${geoText}</span></td>
+          `;
+
+          tbody.appendChild(tr);
+        }
+      }
+
+      function escapeHtml(str) {
+        return String(str)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/\"/g, "&quot;")
+          .replace(/'/g, "&#039;");
+      }
+
+      async function main() {
+        const loading = document.getElementById("loading");
+        const error = document.getElementById("error");
+        const tableWrap = document.getElementById("tableWrap");
+        const meta = document.getElementById("meta");
+
+        try {
+          const res = await fetch("./data.json", { cache: "no-store" });
+          if (!res.ok) throw new Error(`data.json konnte nicht geladen werden (${res.status})`);
+
+          const data = await res.json();
+          const events = Array.isArray(data.events) ? data.events : [];
+
+          meta.textContent = `generatedAt: ${data.generatedAt || ""} · events: ${events.length}`;
+
+          allRows = events.map((ev) => {
+            const startDt = parseIcsDate(ev.start);
+            const endDt = parseIcsDate(ev.end);
+            return {
+              ...ev,
+              startDt,
+              endDt,
+              startText: formatDate(startDt),
+              endText: formatDate(endDt),
+              hasTime: hasTimeComponent(ev.start),
+            };
+          });
+
+          // Sort by start date ascending
+          allRows.sort((a, b) => (a.startDt?.getTime?.() || 0) - (b.startDt?.getTime?.() || 0));
+
+          loading.classList.add("d-none");
+          tableWrap.classList.remove("d-none");
+          render("");
+
+          const filter = document.getElementById("filter");
+          filter.addEventListener("input", () => render(filter.value));
+        } catch (e) {
+          loading.classList.add("d-none");
+          error.classList.remove("d-none");
+          error.textContent = e && e.message ? e.message : String(e);
+        }
+      }
+
+      main();
+    </script>
   </body>
 </html>
