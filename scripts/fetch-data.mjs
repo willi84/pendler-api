@@ -53,8 +53,13 @@ async function main() {
   // - next 14 days (by DTSTART)
   // - must have location
   // - must have a time component (not all-day YYYYMMDD)
+  //
+  // Important: GitHub Actions runs in UTC. If we filter with "now" including time,
+  // events on the same day but earlier than the build time would be dropped.
+  // Therefore we start the window at the beginning of today (UTC).
   const now = new Date();
-  const to = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
+  const windowStart = startOfDayUtc(now);
+  const windowEnd = new Date(windowStart.getTime() + 14 * 24 * 60 * 60 * 1000);
 
   const filtered = events
     .filter((ev) => {
@@ -65,7 +70,7 @@ async function main() {
       const startDt = parseIcsDate(ev.start);
       if (!startDt) return false;
 
-      return startDt >= now && startDt <= to;
+      return startDt >= windowStart && startDt < windowEnd;
     })
     .sort((a, b) => {
       const ad = parseIcsDate(a.start)?.getTime?.() ?? 0;
@@ -106,6 +111,8 @@ async function main() {
           requireLocation: true,
           requireTime: true,
           excludeAllDay: true,
+          windowStartUtc: windowStart.toISOString(),
+          windowEndUtc: windowEnd.toISOString(),
         },
         count: enrichedEvents.length,
         events: enrichedEvents,
@@ -116,7 +123,9 @@ async function main() {
     "utf8"
   );
 
-  console.log(`Wrote ${enrichedEvents.length} events to ${OUTPUT_FILE} (next 14 days, with time+location)`);
+  console.log(
+    `Wrote ${enrichedEvents.length} events to ${OUTPUT_FILE} (next 14 days from ${windowStart.toISOString()} UTC, with time+location)`
+  );
 
   // Save original (raw) ICS from the source
   await fs.writeFile("docs/calendar-original.ics", text, "utf8");
@@ -207,6 +216,10 @@ function hasTimeComponent(value) {
   const v = String(value || "").trim();
   if (!v) return false;
   return !/^\d{8}$/.test(v);
+}
+
+function startOfDayUtc(d) {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 0, 0, 0));
 }
 
 function parseIcsDate(value) {
