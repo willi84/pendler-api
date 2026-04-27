@@ -37,6 +37,10 @@ async function main() {
         return line.slice(line.indexOf(":") + 1).trim();
       };
 
+      // DTSTART/DTEND can have timezone parameters like:
+      // DTSTART;TZID=Europe/Berlin:20260427T090000
+      // Our `get("DTSTART")` already handles this by accepting key + ";".
+
       return {
         id: get("UID") || `event-${index + 1}`,
         title: get("SUMMARY"),
@@ -49,20 +53,15 @@ async function main() {
       };
     });
 
-  // Filter requirements:
-  // - next 14 days (by DTSTART)
-  // - must have location
-  // - must have a time component (not all-day YYYYMMDD)
-  //
-  // Important: GitHub Actions runs in UTC. If we filter with "now" including time,
-  // events on the same day but earlier than the build time would be dropped.
-  // Therefore we start the window at the beginning of today (UTC).
+  // Important: GitHub Actions runs in UTC.
+  // Window is defined as "today 00:00 UTC" up to +14 days.
   const now = new Date();
   const windowStart = startOfDayUtc(now);
   const windowEnd = new Date(windowStart.getTime() + 14 * 24 * 60 * 60 * 1000);
 
   const decisions = {
     totalParsed: events.length,
+    totalExpanded: 0,
     included: 0,
     excluded: 0,
     reasons: {
@@ -71,6 +70,7 @@ async function main() {
       allDayNoTime: 0,
       unparseableStart: 0,
       outsideWindow: 0,
+      outsideWindowAfterExpand: 0,
     },
     examples: {
       missingStart: [],
@@ -78,6 +78,7 @@ async function main() {
       allDayNoTime: [],
       unparseableStart: [],
       outsideWindow: [],
+      outsideWindowAfterExpand: [],
     },
   };
 
@@ -89,11 +90,13 @@ async function main() {
       title: ev.title,
       start: ev.start,
       location: ev.location,
+      rrule: ev.rrule,
       ...extra,
     });
   };
 
-  const include = [];
+  // 1) Pre-filter (basic validity) WITHOUT date window, so we can expand recurring events
+  const baseCandidates = [];
   for (const ev of events) {
     const base = `id=${ev.id} title=${JSON.stringify(ev.title || "")} start=${JSON.stringify(
       ev.start || ""
@@ -132,7 +135,9 @@ async function main() {
       continue;
     }
 
-    if (!(startDt >= windowStart && startDt < windowEnd)) {
+    // If this is a non-recurring event and already outside window, we can exclude early
+    // (recurring ones get expanded first).
+    if (!ev.rrule && !(startDt >= windowStart && startDt < windowEnd)) {
       decisions.excluded++;
       decisions.reasons.outsideWindow++;
       pushExample("outsideWindow", ev, {
@@ -146,21 +151,76 @@ async function main() {
       continue;
     }
 
-    decisions.included++;
-    console.log(`[include] ${base} parsedStartUtc=${startDt.toISOString()}`);
-    include.push(ev);
+    baseCandidates.push({ ev, startDt });
   }
+
+  // 2) Expand recurring events into occurrences that fall within the window
+  const expanded = [];
+  for (const { ev, startDt } of baseCandidates) {
+    if (!ev.rrule) {
+      expanded.push({ ...ev, _occurrenceStart: ev.start, _occurrenceStartDt: startDt });
+      continue;
+    }
+
+    const occurrences = expandRruleOccurrences({
+      uid: ev.id,
+      start: startDt,
+      rrule: ev.rrule,
+      windowStart,
+      windowEnd,
+      maxOccurrences: 200,
+    });
+
+    decisions.totalExpanded += occurrences.length;
+
+    if (!occurrences.length) {
+      // nothing in window
+      decisions.excluded++;
+      decisions.reasons.outsideWindowAfterExpand++;
+      pushExample("outsideWindowAfterExpand", ev, {
+        parsedStartUtc: startDt.toISOString(),
+        windowStartUtc: windowStart.toISOString(),
+        windowEndUtc: windowEnd.toISOString(),
+      });
+      console.log(
+        `[exclude outsideWindowAfterExpand] id=${ev.id} title=${JSON.stringify(
+          ev.title || ""
+        )} DTSTART=${ev.start} RRULE=${JSON.stringify(ev.rrule)} baseStartUtc=${startDt.toISOString()} window=${windowStart.toISOString()}..${windowEnd.toISOString()}`
+      );
+      continue;
+    }
+
+    for (const occ of occurrences) {
+      // Create a stable occurrence id (UID + start)
+      const occId = `${ev.id}#${occ.startIcs}`;
+      expanded.push({
+        ...ev,
+        id: occId,
+        start: occ.startIcs,
+        _occurrenceStart: occ.startIcs,
+        _occurrenceStartDt: occ.startDt,
+      });
+    }
+  }
+
+  // 3) Final filter (window) on expanded set
+  const inWindow = expanded
+    .filter((ev) => {
+      const startDt = ev._occurrenceStartDt || parseIcsDate(ev.start);
+      return startDt && startDt >= windowStart && startDt < windowEnd;
+    })
+    .sort((a, b) => {
+      const ad = a._occurrenceStartDt?.getTime?.() ?? parseIcsDate(a.start)?.getTime?.() ?? 0;
+      const bd = b._occurrenceStartDt?.getTime?.() ?? parseIcsDate(b.start)?.getTime?.() ?? 0;
+      return ad - bd;
+    });
+
+  decisions.included = inWindow.length;
 
   console.log("Decision summary:", JSON.stringify({ ...decisions, examples: undefined }, null, 2));
 
-  const filtered = include.sort((a, b) => {
-    const ad = parseIcsDate(a.start)?.getTime?.() ?? 0;
-    const bd = parseIcsDate(b.start)?.getTime?.() ?? 0;
-    return ad - bd;
-  });
-
   const enrichedEvents = [];
-  for (const event of filtered) {
+  for (const event of inWindow) {
     const geo = event.icsGeo || (await geocode(event.location));
     enrichedEvents.push({
       id: event.id,
@@ -338,6 +398,137 @@ function parseIcsDate(value) {
   return isUtc
     ? new Date(Date.UTC(year, month, day, hour, minute, second))
     : new Date(year, month, day, hour, minute, second);
+}
+
+function toIcsLocalDateTime(dt) {
+  // Convert a Date to YYYYMMDDTHHMMSS (local time components of the Date)
+  // NOTE: dt is a JS Date, which internally is UTC-based, but getters without UTC use local TZ.
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth() + 1).padStart(2, "0");
+  const d = String(dt.getDate()).padStart(2, "0");
+  const hh = String(dt.getHours()).padStart(2, "0");
+  const mm = String(dt.getMinutes()).padStart(2, "0");
+  const ss = String(dt.getSeconds()).padStart(2, "0");
+  return `${y}${m}${d}T${hh}${mm}${ss}`;
+}
+
+function expandRruleOccurrences({ uid, start, rrule, windowStart, windowEnd, maxOccurrences }) {
+  // Minimal RRULE support for typical Google Calendar patterns.
+  // Supports: FREQ=DAILY|WEEKLY, INTERVAL, BYDAY, UNTIL, COUNT
+  // This is *not* a complete RFC5545 implementation, but enough for most lecture schedules.
+
+  const rule = parseRrule(rrule);
+  if (!rule.freq) return [];
+
+  const interval = Number(rule.interval || 1);
+  const until = rule.until ? parseIcsDate(rule.until) : null;
+  const count = rule.count ? Number(rule.count) : null;
+
+  const byday = rule.byday ? rule.byday.split(",").map((x) => x.trim()).filter(Boolean) : null;
+  const weekdaySet = byday ? new Set(byday.map((d) => d.toUpperCase())) : null;
+
+  const occurrences = [];
+
+  // Generate forward from the series DTSTART.
+  // Start iteration at max(windowStart - 7 days, start) to catch weekly rules.
+  const seed = new Date(Math.max(start.getTime(), windowStart.getTime() - 7 * 86400000));
+
+  let cursor = new Date(seed.getTime());
+  let generated = 0;
+
+  const max = maxOccurrences || 200;
+
+  const matchesByDay = (dt) => {
+    if (!weekdaySet) return true;
+    const map = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
+    const key = map[dt.getDay()];
+    return weekdaySet.has(key);
+  };
+
+  const addIfInWindow = (dt) => {
+    if (until && dt > until) return false;
+    if (dt >= windowEnd) return false;
+
+    if (dt >= windowStart && dt < windowEnd) {
+      occurrences.push({
+        startDt: new Date(dt.getTime()),
+        // Keep same style as original DTSTART: if original was Z keep Z, else local
+        startIcs: rruleIncludesZ(start) ? toIcsUtc(dt) : toIcsLocalDateTime(dt),
+      });
+    }
+
+    generated++;
+    if (count && generated >= count) return false;
+    if (occurrences.length >= max) return false;
+    return true;
+  };
+
+  if (rule.freq === "DAILY") {
+    // Step by N days
+    while (cursor < windowEnd && occurrences.length < max) {
+      if (matchesByDay(cursor)) {
+        if (!addIfInWindow(cursor)) break;
+      }
+      cursor = new Date(cursor.getTime() + interval * 86400000);
+    }
+  } else if (rule.freq === "WEEKLY") {
+    // Step day by day, but only include matching weekdays; advance weeks by interval
+    // Simple approach: iterate days; for large windows this is still fine (14 days).
+    const end = new Date(windowEnd.getTime());
+    while (cursor < end && occurrences.length < max) {
+      if (matchesByDay(cursor)) {
+        if (!addIfInWindow(cursor)) break;
+      }
+      cursor = new Date(cursor.getTime() + 86400000);
+    }
+  } else {
+    // Unsupported
+    console.log(`[rrule] unsupported freq for ${uid}: ${rrule}`);
+    return [];
+  }
+
+  return occurrences;
+}
+
+function parseRrule(rrule) {
+  const out = {};
+  const parts = String(rrule || "")
+    .trim()
+    .split(";")
+    .map((p) => p.trim())
+    .filter(Boolean);
+
+  for (const p of parts) {
+    const [k, v] = p.split("=");
+    if (!k || v == null) continue;
+    out[k.toLowerCase()] = v;
+  }
+
+  // Normalize some keys
+  return {
+    freq: out.freq ? String(out.freq).toUpperCase() : null,
+    interval: out.interval,
+    byday: out.byday,
+    until: out.until,
+    count: out.count,
+  };
+}
+
+function toIcsUtc(dt) {
+  const y = dt.getUTCFullYear();
+  const m = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(dt.getUTCDate()).padStart(2, "0");
+  const hh = String(dt.getUTCHours()).padStart(2, "0");
+  const mm = String(dt.getUTCMinutes()).padStart(2, "0");
+  const ss = String(dt.getUTCSeconds()).padStart(2, "0");
+  return `${y}${m}${d}T${hh}${mm}${ss}Z`;
+}
+
+function rruleIncludesZ(start) {
+  // if start is in UTC; heuristic: in our code `start` is a Date already.
+  // We cannot detect original string here; return false to emit local by default.
+  // (The view parses both formats.)
+  return false;
 }
 
 function escapeIcsText(value) {
