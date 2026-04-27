@@ -61,22 +61,103 @@ async function main() {
   const windowStart = startOfDayUtc(now);
   const windowEnd = new Date(windowStart.getTime() + 14 * 24 * 60 * 60 * 1000);
 
-  const filtered = events
-    .filter((ev) => {
-      if (!ev.start) return false;
-      if (!ev.location || !String(ev.location).trim()) return false;
-      if (!hasTimeComponent(ev.start)) return false;
+  const decisions = {
+    totalParsed: events.length,
+    included: 0,
+    excluded: 0,
+    reasons: {
+      missingStart: 0,
+      missingLocation: 0,
+      allDayNoTime: 0,
+      unparseableStart: 0,
+      outsideWindow: 0,
+    },
+    examples: {
+      missingStart: [],
+      missingLocation: [],
+      allDayNoTime: [],
+      unparseableStart: [],
+      outsideWindow: [],
+    },
+  };
 
-      const startDt = parseIcsDate(ev.start);
-      if (!startDt) return false;
-
-      return startDt >= windowStart && startDt < windowEnd;
-    })
-    .sort((a, b) => {
-      const ad = parseIcsDate(a.start)?.getTime?.() ?? 0;
-      const bd = parseIcsDate(b.start)?.getTime?.() ?? 0;
-      return ad - bd;
+  const EXAMPLE_LIMIT = 20;
+  const pushExample = (bucket, ev, extra = {}) => {
+    if (decisions.examples[bucket].length >= EXAMPLE_LIMIT) return;
+    decisions.examples[bucket].push({
+      id: ev.id,
+      title: ev.title,
+      start: ev.start,
+      location: ev.location,
+      ...extra,
     });
+  };
+
+  const include = [];
+  for (const ev of events) {
+    const base = `id=${ev.id} title=${JSON.stringify(ev.title || "")} start=${JSON.stringify(
+      ev.start || ""
+    )} location=${JSON.stringify(ev.location || "")}`;
+
+    if (!ev.start) {
+      decisions.excluded++;
+      decisions.reasons.missingStart++;
+      pushExample("missingStart", ev);
+      console.log(`[exclude missingStart] ${base}`);
+      continue;
+    }
+
+    if (!ev.location || !String(ev.location).trim()) {
+      decisions.excluded++;
+      decisions.reasons.missingLocation++;
+      pushExample("missingLocation", ev);
+      console.log(`[exclude missingLocation] ${base}`);
+      continue;
+    }
+
+    if (!hasTimeComponent(ev.start)) {
+      decisions.excluded++;
+      decisions.reasons.allDayNoTime++;
+      pushExample("allDayNoTime", ev);
+      console.log(`[exclude allDayNoTime] ${base}`);
+      continue;
+    }
+
+    const startDt = parseIcsDate(ev.start);
+    if (!startDt) {
+      decisions.excluded++;
+      decisions.reasons.unparseableStart++;
+      pushExample("unparseableStart", ev);
+      console.log(`[exclude unparseableStart] ${base}`);
+      continue;
+    }
+
+    if (!(startDt >= windowStart && startDt < windowEnd)) {
+      decisions.excluded++;
+      decisions.reasons.outsideWindow++;
+      pushExample("outsideWindow", ev, {
+        parsedStartUtc: startDt.toISOString(),
+        windowStartUtc: windowStart.toISOString(),
+        windowEndUtc: windowEnd.toISOString(),
+      });
+      console.log(
+        `[exclude outsideWindow] ${base} parsedStartUtc=${startDt.toISOString()} window=${windowStart.toISOString()}..${windowEnd.toISOString()}`
+      );
+      continue;
+    }
+
+    decisions.included++;
+    console.log(`[include] ${base} parsedStartUtc=${startDt.toISOString()}`);
+    include.push(ev);
+  }
+
+  console.log("Decision summary:", JSON.stringify({ ...decisions, examples: undefined }, null, 2));
+
+  const filtered = include.sort((a, b) => {
+    const ad = parseIcsDate(a.start)?.getTime?.() ?? 0;
+    const bd = parseIcsDate(b.start)?.getTime?.() ?? 0;
+    return ad - bd;
+  });
 
   const enrichedEvents = [];
   for (const event of filtered) {
@@ -113,6 +194,9 @@ async function main() {
           excludeAllDay: true,
           windowStartUtc: windowStart.toISOString(),
           windowEndUtc: windowEnd.toISOString(),
+        },
+        debug: {
+          decisions,
         },
         count: enrichedEvents.length,
         events: enrichedEvents,
