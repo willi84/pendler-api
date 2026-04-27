@@ -33,6 +33,18 @@ jobs:
       - name: Fetch Google Sheet and build JSON
         run: node scripts/fetch-data.mjs
 
+      - name: Upload calendar artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: calendar
+          path: docs/calendar.ics
+
+      - name: Upload original calendar artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: calendar-original
+          path: docs/calendar-original.ics
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:

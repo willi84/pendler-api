@@ -86,6 +86,15 @@ async function main() {
   );
 
   console.log(`Wrote ${enrichedEvents.length} events to ${OUTPUT_FILE}`);
+
+  // Save original (raw) ICS from the source
+  await fs.writeFile("docs/calendar-original.ics", text, "utf8");
+  console.log("Wrote original ICS to docs/calendar-original.ics");
+
+  // Build and save normalized ICS from enriched events
+  const normalizedIcs = buildIcs(enrichedEvents);
+  await fs.writeFile("docs/calendar.ics", normalizedIcs, "utf8");
+  console.log("Wrote normalized ICS to docs/calendar.ics");
 }
 
 async function geocode(location) {
@@ -158,6 +167,42 @@ function normalizeLocation(location) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function escapeIcsText(value) {
+  return String(value)
+    .replace(/\\/g, "\\\\")
+    .replace(/;/g, "\\;")
+    .replace(/,/g, "\\,")
+    .replace(/\n/g, "\\n");
+}
+
+function buildIcs(events) {
+  const lines = [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//pendler-api//calendar//EN",
+    "CALSCALE:GREGORIAN",
+    "METHOD:PUBLISH",
+  ];
+
+  for (const ev of events) {
+    lines.push("BEGIN:VEVENT");
+    lines.push(`UID:${ev.id}`);
+    if (ev.title) lines.push(`SUMMARY:${escapeIcsText(ev.title)}`);
+    if (ev.location) lines.push(`LOCATION:${escapeIcsText(ev.location)}`);
+    if (ev.description) lines.push(`DESCRIPTION:${escapeIcsText(ev.description)}`);
+    if (ev.start) lines.push(`DTSTART:${ev.start}`);
+    if (ev.end) lines.push(`DTEND:${ev.end}`);
+    if (ev.rrule) lines.push(`RRULE:${ev.rrule}`);
+    if (ev.latitude != null && ev.longitude != null) {
+      lines.push(`GEO:${ev.latitude};${ev.longitude}`);
+    }
+    lines.push("END:VEVENT");
+  }
+
+  lines.push("END:VCALENDAR");
+  return lines.join("\r\n") + "\r\n";
 }
 
 main().catch((err) => {
