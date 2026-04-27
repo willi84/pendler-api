@@ -34,6 +34,25 @@
         <div class="card-body">
           <div id="meta" class="small text-body-secondary mb-3"></div>
 
+          <!-- Debug / Build report -->
+          <div id="debugWrap" class="d-none mb-3">
+            <div class="alert alert-secondary mb-2" role="alert">
+              <div class="d-flex flex-wrap gap-2 align-items-center">
+                <div class="fw-semibold">Build-Filter Report</div>
+                <span class="badge text-bg-primary" id="dbgTotal">parsed: -</span>
+                <span class="badge text-bg-success" id="dbgIncluded">included: -</span>
+                <span class="badge text-bg-danger" id="dbgExcluded">excluded: -</span>
+                <span class="badge text-bg-light text-dark" id="dbgWindow">window: -</span>
+              </div>
+              <div class="small text-body-secondary mt-2" id="dbgHint"></div>
+            </div>
+
+            <details class="bg-white border rounded p-2">
+              <summary class="small">Details (Gründe & Beispiele)</summary>
+              <div class="mt-2" id="dbgDetails"></div>
+            </details>
+          </div>
+
           <div id="loading" class="alert alert-info mb-0" role="alert">Lade Events…</div>
           <div id="error" class="alert alert-danger d-none" role="alert"></div>
 
@@ -108,6 +127,87 @@
         return value && !/^\d{8}$/.test(String(value).trim());
       }
 
+      function escapeHtml(str) {
+        return String(str)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/\"/g, "&quot;")
+          .replace(/'/g, "&#039;");
+      }
+
+      function renderDebug(data) {
+        const debugWrap = document.getElementById("debugWrap");
+        const dbgTotal = document.getElementById("dbgTotal");
+        const dbgIncluded = document.getElementById("dbgIncluded");
+        const dbgExcluded = document.getElementById("dbgExcluded");
+        const dbgWindow = document.getElementById("dbgWindow");
+        const dbgHint = document.getElementById("dbgHint");
+        const dbgDetails = document.getElementById("dbgDetails");
+
+        const decisions = data?.debug?.decisions;
+        if (!decisions) return; // older data.json
+
+        debugWrap.classList.remove("d-none");
+
+        dbgTotal.textContent = `parsed: ${decisions.totalParsed ?? "-"}`;
+        dbgIncluded.textContent = `included: ${decisions.included ?? "-"}`;
+        dbgExcluded.textContent = `excluded: ${decisions.excluded ?? "-"}`;
+
+        const ws = data?.filtered?.windowStartUtc;
+        const we = data?.filtered?.windowEndUtc;
+        dbgWindow.textContent = ws && we ? `window: ${ws} … ${we}` : "window: -";
+
+        dbgHint.textContent =
+          "Wenn keine Events erscheinen, prüfe hier die Ausschlussgründe (z.B. missingLocation / allDayNoTime / outsideWindow).";
+
+        const reasons = decisions.reasons || {};
+        const examples = decisions.examples || {};
+        const reasonKeys = Object.keys(reasons);
+
+        dbgDetails.innerHTML = "";
+
+        // Reasons table
+        const table = document.createElement("table");
+        table.className = "table table-sm mb-2";
+        table.innerHTML = `
+          <thead>
+            <tr>
+              <th>Reason</th>
+              <th class="text-end">Count</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${reasonKeys
+              .sort((a, b) => (reasons[b] || 0) - (reasons[a] || 0))
+              .map((k) => `<tr><td><code>${escapeHtml(k)}</code></td><td class="text-end">${reasons[k] || 0}</td></tr>`)
+              .join("")}
+          </tbody>
+        `;
+        dbgDetails.appendChild(table);
+
+        // Examples (accordion-like via details)
+        for (const key of reasonKeys) {
+          const ex = Array.isArray(examples[key]) ? examples[key] : [];
+          if (!ex.length) continue;
+
+          const d = document.createElement("details");
+          d.className = "mb-2";
+
+          const summary = document.createElement("summary");
+          summary.className = "small";
+          summary.innerHTML = `<code>${escapeHtml(key)}</code> Beispiele (${ex.length})`;
+          d.appendChild(summary);
+
+          const pre = document.createElement("pre");
+          pre.className = "small bg-light border rounded p-2 mt-2 mb-0";
+          pre.textContent = JSON.stringify(ex, null, 2);
+          d.appendChild(pre);
+
+          dbgDetails.appendChild(d);
+        }
+      }
+
       let allRows = [];
 
       function render(filterText) {
@@ -144,15 +244,6 @@
         }
       }
 
-      function escapeHtml(str) {
-        return String(str)
-          .replace(/&/g, "&amp;")
-          .replace(/</g, "&lt;")
-          .replace(/>/g, "&gt;")
-          .replace(/\"/g, "&quot;")
-          .replace(/'/g, "&#039;");
-      }
-
       async function main() {
         const loading = document.getElementById("loading");
         const error = document.getElementById("error");
@@ -167,6 +258,8 @@
           const events = Array.isArray(data.events) ? data.events : [];
 
           meta.textContent = `generatedAt: ${data.generatedAt || ""} · events: ${events.length}`;
+
+          renderDebug(data);
 
           allRows = events.map((ev) => {
             const startDt = parseIcsDate(ev.start);
